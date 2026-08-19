@@ -1,0 +1,16 @@
+numpy
+pandas
+scikit-learn
+xgboost
+lightgbm
+optuna
+matplotlib
+fredapi
+geopy
+osmnx
+census
+joblib
+fastapi
+uvicorn[standard]
+sqlalchemy
+pydantic
