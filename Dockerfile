@@ -34,7 +34,10 @@ ENV DATABASE_URL=""
 
 EXPOSE 8000
 
+# Shell form (not exec form) so ${PORT} is actually expanded. Render (and
+# several other PaaS platforms) inject a PORT env var at runtime and expect
+# the container to listen on it; falls back to 8000 for plain `docker run`.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)" || exit 1
+    CMD python healthcheck.py
 
-CMD ["uvicorn", "api_service:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["sh", "-c", "uvicorn api_service:app --host 0.0.0.0 --port ${PORT:-8000}"]
