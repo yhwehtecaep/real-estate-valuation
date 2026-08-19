@@ -1,0 +1,12 @@
+.git
+__pycache__/
+*.pyc
+.DS_Store
+
+# Never bake local secrets into the image -- pass at `docker run` time
+# instead, via -e or --env-file (see README / .env.example).
+.env
+*.key
+
+# Local runtime state, not part of the image build
+artifacts/underwriting.db

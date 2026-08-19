@@ -6,6 +6,7 @@ lightgbm
 optuna
 matplotlib
 fredapi
+python-dotenv
 geopy
 osmnx
 census

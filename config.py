@@ -12,6 +12,16 @@ from dataclasses import dataclass, field
 from typing import List, Dict, Tuple
 import os
 
+from dotenv import load_dotenv
+
+# Loads variables from a local .env file (if present) into os.environ,
+# BEFORE anything below reads an env var. This is the one place it's
+# called -- every other module gets it for free by importing config first.
+# Safe to call even with no .env file (no-op); never overwrites a variable
+# already set in the real environment (e.g. by `docker run -e ...` or
+# `export ...`) -- see .env.example for the full list of supported keys.
+load_dotenv()
+
 # --------------------------------------------------------------------------- #
 # Paths
 # --------------------------------------------------------------------------- #
@@ -27,6 +37,7 @@ os.makedirs(PLOT_DIR, exist_ok=True)
 AMES_CSV_PATH = os.path.join(BASE_DIR, "ames_raw.csv")
 
 RANDOM_STATE = 42
+
 
 # --------------------------------------------------------------------------- #
 # Schema (all real columns from the Ames, Iowa Assessor's Office dataset,

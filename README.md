@@ -7,15 +7,32 @@ anywhere in the training data), with leakage-safe cross-validation, an
 immutable pre-deployment holdout set, an automated underwriting engine,
 model artifact persistence, and a SQL-backed audit trail.
 
+## Configuration (.env)
+
+```bash
+cp .env.example .env
+# then edit .env and fill in what you want -- both are optional, see below
+```
+
+`config.py` loads `.env` automatically (via `python-dotenv`) before anything
+reads an environment variable, so every script below (`main.py`,
+`export_pipeline.py`, `api_service.py`) picks it up for free -- nothing
+else to configure. `.env` is gitignored/dockerignored, so real keys never
+get committed or baked into the image.
+
+| Variable | Required? | Effect if unset |
+|---|---|---|
+| `FRED_API_KEY` | No | Falls back to real cached historical FRED figures (2006-2010) instead of live data. Free key: https://fred.stlouisfed.org/docs/api/api_key.html |
+| `DATABASE_URL` | No | Defaults to a local SQLite file (`artifacts/underwriting.db`). Set to a Postgres URL to use that instead. |
+
+OpenStreetMap Nominatim (neighborhood geocoding) and the OSM Overpass API
+(highway/rail/park proximity) need no key at all -- just outbound network
+access.
+
 ## Quick start -- training pipeline
 
 ```bash
 pip install -r requirements.txt
-
-# Optional but recommended -- enables live macro data instead of the cached
-# real fallback. Get a free key at https://fred.stlouisfed.org/docs/api/api_key.html
-export FRED_API_KEY="your_free_fred_api_key"
-
 python main.py
 ```
 
@@ -228,7 +245,11 @@ docker build -t real-estate-valuation .
 # SQLite (default), cached-real macro fallback:
 docker run -p 8000:8000 real-estate-valuation
 
-# Live FRED macro data + Postgres:
+# Using .env (recommended -- see Configuration above):
+cp .env.example .env   # fill in FRED_API_KEY / DATABASE_URL as desired
+docker run -p 8000:8000 --env-file .env real-estate-valuation
+
+# or set individual variables inline instead of a file:
 docker run -p 8000:8000 \
   -e FRED_API_KEY="your_free_fred_api_key" \
   -e DATABASE_URL="postgresql://user:pass@host:5432/dbname" \

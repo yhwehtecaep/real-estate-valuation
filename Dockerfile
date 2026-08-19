@@ -22,12 +22,14 @@ COPY . .
 RUN test -f artifacts/model_bundle/pipeline_bundle.joblib || python export_pipeline.py
 
 ENV PYTHONUNBUFFERED=1
-# Set at `docker run` time to enable live FRED data, e.g.:
-#   docker run -e FRED_API_KEY=your_key -p 8000:8000 real-estate-valuation
+# .env is gitignored/dockerignored on purpose -- never baked into the image.
+# Pass real secrets at `docker run` time instead:
+#   docker run -p 8000:8000 --env-file .env real-estate-valuation
+# or individually:
+#   docker run -p 8000:8000 -e FRED_API_KEY=your_key real-estate-valuation
+# Both default to empty/unset here, matching config.py's graceful fallback
+# (cached real macro data, local SQLite) when unset.
 ENV FRED_API_KEY=""
-# Defaults to a SQLite file inside the container; override to point at
-# Postgres or another SQLAlchemy-supported backend, e.g.:
-#   docker run -e DATABASE_URL=postgresql://user:pass@host:5432/db ...
 ENV DATABASE_URL=""
 
 EXPOSE 8000
