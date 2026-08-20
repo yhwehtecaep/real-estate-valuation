@@ -22,15 +22,16 @@ COPY . .
 RUN test -f artifacts/model_bundle/pipeline_bundle.joblib || python export_pipeline.py
 
 ENV PYTHONUNBUFFERED=1
-# .env is gitignored/dockerignored on purpose -- never baked into the image.
-# Pass real secrets at `docker run` time instead:
+# FRED_API_KEY / DATABASE_URL are intentionally NOT declared here (not even
+# as empty strings -- an ENV with an empty value is still "present" to
+# os.environ.get, which used to break the DATABASE_URL fallback logic; see
+# database.py's _resolve_database_url). Leave them genuinely absent in the
+# image and set them at `docker run` time if you want them:
 #   docker run -p 8000:8000 --env-file .env real-estate-valuation
 # or individually:
 #   docker run -p 8000:8000 -e FRED_API_KEY=your_key real-estate-valuation
-# Both default to empty/unset here, matching config.py's graceful fallback
-# (cached real macro data, local SQLite) when unset.
-ENV FRED_API_KEY=""
-ENV DATABASE_URL=""
+# Absent is the normal case and matches config.py's graceful fallback
+# (cached real macro data, local SQLite).
 
 EXPOSE 8000
 

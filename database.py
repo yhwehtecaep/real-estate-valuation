@@ -94,7 +94,14 @@ class UnderwritingEvaluation(Base):
 # Engine / session management
 # --------------------------------------------------------------------------- #
 def _resolve_database_url() -> str:
-    return os.environ.get(config.DATABASE_URL_ENV_VAR, config.DEFAULT_DATABASE_URL)
+    """
+    Falls back to config.DEFAULT_DATABASE_URL when DATABASE_URL is either
+    absent OR present-but-empty (os.environ.get alone only handles the
+    absent case -- an empty string is a valid env var value and would
+    otherwise reach SQLAlchemy's create_engine() and fail to parse).
+    """
+    url = os.environ.get(config.DATABASE_URL_ENV_VAR, "").strip()
+    return url or config.DEFAULT_DATABASE_URL
 
 
 def build_engine(database_url: Optional[str] = None):
