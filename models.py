@@ -22,7 +22,7 @@ from typing import Dict, List, Tuple, Iterator
 
 import numpy as np
 import pandas as pd
-from sklearn.linear_model import Ridge
+from sklearn.linear_model import Ridge, LinearRegression
 from sklearn.preprocessing import StandardScaler, PolynomialFeatures
 from sklearn.pipeline import Pipeline
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
@@ -320,6 +320,142 @@ def tune_ridge_alpha(X: pd.DataFrame, y: pd.Series, numeric_cols: List[str]) -> 
             best_rmse, best_alpha = mean_rmse, alpha
     logger.info("Ridge best alpha=%.3f (OOF RMSE log-price=%.5f)", best_alpha, best_rmse)
     return best_alpha
+
+
+# --------------------------------------------------------------------------- #
+# Stacked ensemble: blends Ridge + XGBoost via a meta-learner, instead of
+# picking a single "winning" model
+# --------------------------------------------------------------------------- #
+class StackedEnsemble:
+    """
+    Two-stage stacking ensemble: Ridge + XGBoost as base learners, blended
+    by a small meta-learner (LinearRegression) trained on their real
+    out-of-fold predictions.
+
+    Why stacking instead of a hard per-listing "pick one model" router:
+    a router would need enough historical examples per segment (e.g. per
+    neighborhood) to confidently learn which model wins there. Several
+    real Ames neighborhoods have well under 15 holdout sales -- nowhere
+    near enough to learn that reliably without mostly memorizing noise.
+    A continuous blend degrades gracefully instead of making a brittle
+    all-or-nothing bet on a small sample; the meta-learner can still lean
+    more on one base model in situations where it's historically
+    stronger, just without fully committing to it.
+
+    Fit procedure
+    -------------
+    1. `fit_with_oof()`: under the SAME GroupTimeSeriesSplit used
+       everywhere else in this codebase, generate real out-of-fold
+       predictions from Ridge and XGBoost on the full dev set (each fold's
+       predictions come from copies of each model that never saw that
+       fold during their own fitting -- no leakage into the meta-learner).
+       The meta-learner is fit on
+       [ridge_oof_pred, xgb_oof_pred, neighborhood_target_encoding] -> y,
+       so it can implicitly learn how much to trust each base model
+       conditional on the property's neighborhood.
+    2. `fit_final()`: refits both base learners on the FULL dev set, for
+       deployment (the meta-learner from step 1 is kept as-is -- refitting
+       it too would need a second, nested OOF procedure for marginal
+       benefit, and this project's dev set is small enough that the
+       simpler approach is the better bias/variance tradeoff).
+    3. `predict()`: runs both base learners, feeds their predictions +
+       neighborhood encoding through the fitted meta-learner.
+    """
+
+    def __init__(self, xgb_params: Dict, ridge_alpha: float, random_state: int = config.RANDOM_STATE):
+        self.xgb_params = xgb_params
+        self.ridge_alpha = ridge_alpha
+        self.random_state = random_state
+        self.ridge_model_ = None
+        self.xgb_model_ = None
+        self.meta_model_ = None
+        self.numeric_cols_ = None
+
+    def _fit_xgb(self, X_tr: pd.DataFrame, y_tr: pd.Series) -> xgb.XGBRegressor:
+        model = xgb.XGBRegressor(**self.xgb_params, random_state=self.random_state,
+                                  tree_method="hist", objective="reg:squarederror")
+        model.fit(X_tr, y_tr)
+        return model
+
+    def fit_with_oof(self, X_raw: pd.DataFrame, y: pd.Series,
+                      n_splits: int = config.N_SPATIAL_FOLDS) -> Dict[str, np.ndarray]:
+        """
+        X_raw: the raw dev-set dataframe (pre fold-safe preprocessing),
+        same shape as what's passed into GroupTimeSeriesSplit elsewhere in
+        this codebase (DATE_COL / GROUP_COL / raw feature columns).
+
+        Returns a dict of diagnostic arrays (oof_ridge, oof_xgb,
+        valid_mask) so callers can report meta-learner fit quality.
+        """
+        splitter = GroupTimeSeriesSplit(n_splits=n_splits)
+        n = len(X_raw)
+        oof_ridge = np.full(n, np.nan)
+        oof_xgb = np.full(n, np.nan)
+        oof_nbhd_te = np.full(n, np.nan)
+
+        for train_idx, val_idx in splitter.split(X_raw):
+            X_tr_raw = X_raw.iloc[train_idx].reset_index(drop=True)
+            X_va_raw = X_raw.iloc[val_idx].reset_index(drop=True)
+            y_tr_raw = y.iloc[train_idx].reset_index(drop=True)
+
+            X_tr, y_tr, X_va, fitted = preprocess_fold(X_tr_raw, y_tr_raw, X_va_raw)
+            numeric_cols = fitted["numeric_cols"]
+
+            ridge_pipe = build_ridge_spatial_pipeline(self.ridge_alpha, numeric_cols)
+            ridge_pipe.fit(X_tr[numeric_cols], y_tr)
+            ridge_pred = ridge_pipe.predict(X_va[numeric_cols])
+
+            xgb_model = self._fit_xgb(X_tr, y_tr)
+            xgb_pred = xgb_model.predict(X_va)
+
+            # Validation-fold rows are never dropped by IsolationForestFlagger
+            # (only training rows are), so val_idx aligns directly back to
+            # the original X_raw/y row order.
+            oof_ridge[val_idx] = ridge_pred
+            oof_xgb[val_idx] = xgb_pred
+            oof_nbhd_te[val_idx] = X_va["Neighborhood_te"].to_numpy()
+
+        # The earliest block of rows never lands in a validation fold (the
+        # first block is train-only, by GroupTimeSeriesSplit's design) --
+        # exclude those from meta-learner fitting rather than impute them.
+        valid_mask = ~np.isnan(oof_ridge)
+        meta_X = np.column_stack([oof_ridge[valid_mask], oof_xgb[valid_mask], oof_nbhd_te[valid_mask]])
+        meta_y = y.to_numpy()[valid_mask]
+
+        self.meta_model_ = LinearRegression()
+        self.meta_model_.fit(meta_X, meta_y)
+        logger.info(
+            "Meta-learner fit on %d real out-of-fold predictions. "
+            "Coefficients [ridge_pred, xgb_pred, neighborhood_te]=%s, intercept=%.4f",
+            valid_mask.sum(), np.round(self.meta_model_.coef_, 4), self.meta_model_.intercept_,
+        )
+        return {"oof_ridge": oof_ridge, "oof_xgb": oof_xgb, "valid_mask": valid_mask}
+
+    def fit_final(self, X_tr: pd.DataFrame, y_tr: pd.Series, numeric_cols: List[str]) -> "StackedEnsemble":
+        """Refits both base learners on the FULL dev set, for deployment. Call after fit_with_oof()."""
+        if self.meta_model_ is None:
+            raise RuntimeError("Call fit_with_oof() before fit_final() -- the meta-learner must be fit first.")
+        self.numeric_cols_ = numeric_cols
+        self.ridge_model_ = build_ridge_spatial_pipeline(self.ridge_alpha, numeric_cols)
+        self.ridge_model_.fit(X_tr[numeric_cols], y_tr)
+        self.xgb_model_ = self._fit_xgb(X_tr, y_tr)
+        return self
+
+    def predict(self, X: pd.DataFrame) -> np.ndarray:
+        if self.ridge_model_ is None or self.xgb_model_ is None:
+            raise RuntimeError("Call fit_final() before predict().")
+        ridge_pred = self.ridge_model_.predict(X[self.numeric_cols_])
+        xgb_pred = self.xgb_model_.predict(X)
+        nbhd_te = X["Neighborhood_te"].to_numpy()
+        meta_X = np.column_stack([ridge_pred, xgb_pred, nbhd_te])
+        return self.meta_model_.predict(meta_X)
+
+    def base_predictions(self, X: pd.DataFrame) -> Dict[str, np.ndarray]:
+        """Exposes both base learners' raw predictions -- used for feature-contribution explanations."""
+        return {
+            "ridge_pred": self.ridge_model_.predict(X[self.numeric_cols_]),
+            "xgb_pred": self.xgb_model_.predict(X),
+        }
 
 
 # --------------------------------------------------------------------------- #

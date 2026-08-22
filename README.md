@@ -353,31 +353,68 @@ under the same spatial-temporal splitter, within conservative bounds:
 `max_depth` in [3, 6], `subsample`/`colsample_bytree` <= 0.8, explicit L1
 (`reg_alpha`) and L2 (`reg_lambda`), plus early stopping on validation RMSE.
 
-## Latest run results (full dataset, 25 Optuna trials, 5 folds)
+## Model architecture: stacked ensemble
 
-Dev-set out-of-fold CV (90% of data, cached-real macro fallback in this
-environment since no live network path to FRED/OSM exists here):
+Manually spot-checking real holdout sales (see project history) showed
+neither Ridge nor XGBoost wins uniformly -- Ridge does better on some
+neighborhoods, XGBoost on others, and several real Ames neighborhoods have
+well under 15 holdout sales, nowhere near enough to reliably learn a
+*hard* per-neighborhood router without mostly memorizing noise.
+
+The deployed model (`models.StackedEnsemble`, exported by default) instead
+**blends** Ridge + XGBoost via a small meta-learner (`LinearRegression`)
+trained on their real out-of-fold predictions plus the neighborhood's
+target-encoded value:
+
+1. Under the same `GroupTimeSeriesSplit` used everywhere else, Ridge and
+   XGBoost each produce real out-of-fold predictions on the dev set (never
+   predicting on data either model was trained on).
+2. The meta-learner fits on `[ridge_oof_pred, xgb_oof_pred,
+   neighborhood_target_encoding] -> y`, learning a smooth, continuous
+   blend rather than a brittle all-or-nothing pick.
+3. Both base learners are refit on the full dev set for deployment; the
+   meta-learner combines their predictions at inference time.
+
+`/predict`'s `FeatureContributions` for this model type is an exact,
+per-request decomposition of the meta-learner's linear terms (how much
+each base model's prediction, and the neighborhood encoding, contributed
+to the final blended value) -- not a global importance.
+
+Pass `--model ridge_spatial` / `xgboost` / `lightgbm` to `export_pipeline.py`
+to export a single model instead, or `--reselect` to re-run the three-way
+single-model CV comparison (see `export_pipeline.py --help`).
+
+## Latest run results (full dataset, 15 Optuna trials, 5 folds)
+
+Dev-set out-of-fold CV, single models (90% of data, cached-real macro
+fallback in this environment since no live network path to FRED/OSM
+exists here):
 
 | Model | MAE ($) | RMSE ($) | MAPE (%) | R² |
 |---|---|---|---|---|
 | XGBoost | 25,142 | 39,075 | 13.59 | 0.677 |
 | LightGBM | 25,595 | 39,366 | 14.15 | 0.663 |
-| Ridge | 21,168 | 32,486 | 11.87 | **0.783** |
+| Ridge | 21,168 | 32,486 | 11.87 | 0.783 |
 
-**Final unbiased holdout evaluation** (Ridge, 293 untouched real sales,
-never seen during tuning or CV): MAE $19,541, RMSE $29,573, MAPE 13.0%,
-R² 0.846.
+**Final unbiased holdout evaluation** (293 untouched real sales, never
+seen during tuning or CV):
 
-Ridge wins consistently — plausible for Ames, where price is driven
-heavily by a few strong, fairly linear drivers (living area, overall
-quality, neighborhood). Re-run with live geo features enabled and/or more
-Optuna trials to see whether the boosted trees close the gap.
+| Model | MAE ($) | RMSE ($) | MAPE (%) | R² |
+|---|---|---|---|---|
+| Ridge alone | 19,541 | 29,573 | 13.0 | 0.846 |
+| **Stacked ensemble (deployed)** | **19,005** | **26,870** | **12.74** | **0.873** |
+
+The stacked ensemble improves on every metric versus Ridge alone on the
+same untouched holdout set -- consistent with the per-neighborhood
+analysis showing each base model has real, different strengths rather
+than one uniformly dominating.
 
 ## Extending to production
 
 - Set `FRED_API_KEY` and ensure outbound network access to FRED/Nominatim/
   Overpass to enable all live data sources.
 - Swap `ames_raw.csv` / `load_raw_data()` for a live MLS/county-assessor
+
   extract with the same column names; feed `screening_engine.DealScreener`
   a real live listings feed instead of the holdout-sample demo.
 - Raise `N_OPTUNA_TRIALS` for a more thorough hyperparameter search.

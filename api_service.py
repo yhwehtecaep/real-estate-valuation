@@ -211,14 +211,20 @@ def _prep_and_score(listings: List[PropertyListingRequest], bundle: Dict[str, An
 
 def _feature_contributions(x_row: pd.Series, bundle: Dict[str, Any]) -> Dict[str, float]:
     """
-    Per-request linear feature contributions for a fitted Ridge pipeline
-    (coefficient * transformed feature value). Falls back to the model's
-    global feature_importances_ (e.g. XGBoost/LightGBM) if the exported
-    model isn't linear -- that fallback is a GLOBAL importance, not a
-    per-instance explanation.
+    Per-request linear feature contributions.
+    - Fitted Ridge pipeline: exact coefficient * transformed feature value.
+    - Stacked ensemble: exact meta-learner decomposition -- how much each
+      base model's (log-space) prediction, and the neighborhood encoding,
+      contributed to the final blended prediction. This is a real,
+      per-instance explanation (not a global importance), since it's
+      literally the meta-learner's linear terms for this specific row.
+    - Anything else (e.g. a single XGBoost/LightGBM export): falls back to
+      the model's global feature_importances_ -- explicitly a GLOBAL
+      importance, not a per-instance explanation.
     """
     model = bundle["model"]
     numeric_cols = bundle["numeric_cols"]
+
     if bundle["model_name"] == "ridge_spatial":
         try:
             ct = model.named_steps["features"]
@@ -230,6 +236,29 @@ def _feature_contributions(x_row: pd.Series, bundle: Dict[str, Any]) -> Dict[str
         except Exception as e:
             logger.warning("Could not compute per-instance Ridge contributions: %s", e)
             return {}
+
+    if bundle["model_name"] == "stacked_ensemble":
+        try:
+            # base_predictions() needs the FULL row (numeric_cols is
+            # computed in preprocess_fold BEFORE is_outlier_score/
+            # Neighborhood_te are added, so it under-covers what the
+            # fitted XGBoost sub-model actually expects; the Ridge
+            # sub-model internally selects its own numeric_cols subset).
+            base_preds = model.base_predictions(pd.DataFrame([x_row]))
+            ridge_pred = base_preds["ridge_pred"][0]
+            xgb_pred = base_preds["xgb_pred"][0]
+            nbhd_te = x_row["Neighborhood_te"]
+            coefs = model.meta_model_.coef_
+            return {
+                "ridge_base_model": float(coefs[0] * ridge_pred),
+                "xgboost_base_model": float(coefs[1] * xgb_pred),
+                "neighborhood_encoding": float(coefs[2] * nbhd_te),
+                "meta_intercept": float(model.meta_model_.intercept_),
+            }
+        except Exception as e:
+            logger.warning("Could not compute per-instance stacked-ensemble contributions: %s", e)
+            return {}
+
     if hasattr(model, "feature_importances_"):
         return {col: float(imp) for col, imp in zip(numeric_cols, model.feature_importances_)}
     return {}
